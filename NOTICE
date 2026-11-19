@@ -1,0 +1,12 @@
+Taobao Coins
+
+This distribution adapts task navigation, browsing, and quiz logic from
+czl0325/coin11-tb, licensed under the Apache License, Version 2.0.
+Upstream source: https://github.com/czl0325/coin11-tb
+Upstream revision used by the local project: d4d738e
+
+The adapted code has been reorganized and modified for a coin-only workflow,
+whole-row task filtering, Taobao foreground checks, regional screenshot OCR,
+completion detection, nonblocking quizzes, and portable launch scripts.
+
+Modifications in this distribution are provided under Apache-2.0.

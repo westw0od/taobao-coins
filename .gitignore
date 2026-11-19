@@ -1,0 +1,15 @@
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+logs/
+*.log
+*.png
+*.jpg
+*.xml
+.env
+.env.*
+platform-tools/
+.idea/
+.vscode/
+.DS_Store
