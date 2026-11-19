@@ -51,11 +51,24 @@ def run_lock():
         yield
 
 
-def save_screen(device, directory, name):
-    try:
-        device.screenshot().save(str(directory / f"{name}.png"))
-    except Exception as error:
-        print(f"截图保存失败 {error}", flush=True)
+def cleanup_screenshots(directory):
+    root = directory.resolve()
+    deleted = 0
+    failed = []
+    for path in root.rglob("*"):
+        if path.suffix.lower() not in (".png", ".jpg", ".jpeg", ".webp"):
+            continue
+        if not path.is_file() or not path.resolve().is_relative_to(root):
+            continue
+        try:
+            path.unlink()
+            deleted += 1
+        except OSError as error:
+            failed.append(str(path.relative_to(root)))
+            print(f"截图清理失败 {path.name} {error}", flush=True)
+    if deleted:
+        print(f"已清理 {deleted} 张历史截图", flush=True)
+    return {"deleted": deleted, "failed": failed}
 
 
 def execute(args):
@@ -65,18 +78,17 @@ def execute(args):
     directory = ROOT / "logs" / datetime.now().strftime("coins-%Y%m%d-%H%M%S-%f")
     directory.mkdir()
     result = {"started_at": datetime.now().isoformat(), "status": "running"}
-    device = None
     exit_code = 0
     with (directory / "run.log").open("w", encoding="utf-8") as log:
         with redirect_stdout(Tee(sys.stdout, log)), redirect_stderr(Tee(sys.stderr, log)):
             try:
+                result["screenshot_cleanup_on_start"] = cleanup_screenshots(ROOT / "logs")
                 device = connect(args.serial, args.adb)
                 print(f"设备已连接，前台应用 {foreground(device)}", flush=True)
                 if args.check:
                     result["status"] = "device_ready"
                     print("设备检查完成。直接运行 main.py 可开始金币任务。", flush=True)
                 else:
-                    save_screen(device, directory, "start")
                     result.update(run(device, args.android_user))
                     result["status"] = "scan_finished"
             except NeedsAttention as error:
@@ -92,8 +104,11 @@ def execute(args):
                 traceback.print_exc()
                 exit_code = 1
             finally:
-                if device is not None and not args.check:
-                    save_screen(device, directory, "finish")
+                cleanup = cleanup_screenshots(ROOT / "logs")
+                result["screenshot_cleanup_on_exit"] = cleanup
+                if cleanup["failed"] and exit_code == 0:
+                    result.update(status="cleanup_failed", error="部分历史截图清理失败，请查看 run.log。")
+                    exit_code = 1
                 result.update(finished_at=datetime.now().isoformat(), exit_code=exit_code)
                 (directory / "result.json").write_text(
                     json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8",
