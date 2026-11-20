@@ -5,6 +5,10 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.FutureTask;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.ExecutionException;
 import static org.junit.Assert.*;
 import static org.mockito.Mockito.*;
 
@@ -41,13 +45,15 @@ public class CoinEngineTest {
         verify(phone).log(contains("跳过：点击商品任务"));
         verify(phone).log(contains("观察到 1 次进度更新，跳过 1 项"));
     }
-    @Test public void verificationPropagatesWithoutMoreGestures() throws Exception {
+    @Test public void verificationPausesBeforeAnyRecoveryGestureAndStopEndsRun() throws Exception {
         CoinService phone = mock(CoinService.class);
         when(phone.foreground()).thenReturn(PageModel.TAOBAO);
         when(phone.read()).thenReturn(panel(false), panel(false))
             .thenThrow(new CoinService.Attention("手机需要完成验证"));
-        try { new CoinEngine(phone).run(); fail("Verification must stop the run"); }
-        catch (CoinService.Attention expected) { assertTrue(expected.getMessage().contains("验证")); }
+        doThrow(new InterruptedException()).when(phone).awaitUser(anyString());
+        try { new CoinEngine(phone).run(); fail("Stop during manual pause must interrupt the run"); }
+        catch (InterruptedException expected) { }
+        verify(phone).awaitUser("手机需要完成验证");
         verify(phone, times(1)).tap(any());
         verify(phone, never()).back();
         verify(phone, never()).log(contains("本轮结束"));
@@ -86,8 +92,10 @@ public class CoinEngineTest {
         when(phone.foreground()).thenReturn(PageModel.TAOBAO);
         when(phone.read()).thenReturn(new PageModel.Page(List.of(new PageModel.Line(
             "淘工厂红包签到领淘金币芭芭农场菜鸟驿站", 30, 900, 1050, 955)), 1080, 2340));
+        doThrow(new InterruptedException()).when(phone).awaitUser(anyString());
         try { new CoinEngine(phone).run(); fail("A joined icon row is not a button"); }
-        catch (CoinService.Attention expected) { assertTrue(expected.getMessage().contains("整排图标")); }
+        catch (InterruptedException expected) { }
+        verify(phone).awaitUser(contains("整排图标"));
         verify(phone, never()).tap(any());
         verify(phone, never()).back();
     }
@@ -109,9 +117,93 @@ public class CoinEngineTest {
         CoinService phone = mock(CoinService.class);
         when(phone.foreground()).thenReturn(PageModel.TAOBAO);
         when(phone.read()).thenReturn(new PageModel.Page(List.of(line("领淘金币", 500, 900)), 1080, 2340));
+        doThrow(new InterruptedException()).when(phone).awaitUser(anyString());
         try { new CoinEngine(phone).run(); fail("Unchanged navigation must stop"); }
-        catch (CoinService.Attention expected) { assertTrue(expected.getMessage().contains("点击后")); }
+        catch (InterruptedException expected) { }
+        verify(phone).awaitUser(contains("点击后"));
         verify(phone, times(2)).tap(any());
         verify(phone, never()).back();
+    }
+    @Test public void navigationWaitsWithoutGesturesThenRechecksManualPage() throws Exception {
+        CoinService phone = mock(CoinService.class);
+        when(phone.foreground()).thenReturn(PageModel.TAOBAO);
+        AtomicReference<PageModel.Page> page = new AtomicReference<>(new PageModel.Page(List.of(new PageModel.Line(
+            "红包签到领淘金币芭芭农场菜鸟驿站", 30, 900, 1050, 955)), 1080, 2340));
+        when(phone.read()).thenAnswer(invocation -> page.get());
+        ManualPause gate = new ManualPause();
+        CountDownLatch paused = new CountDownLatch(1);
+        doAnswer(invocation -> { gate.awaitResume(paused::countDown); return null; }).when(phone).awaitUser(anyString());
+        FutureTask<Void> work = new FutureTask<>(() -> { new CoinEngine(phone).run(); return null; });
+        Thread thread = new Thread(work);
+        thread.start();
+        try {
+            assertTrue(paused.await(2, TimeUnit.SECONDS));
+            assertFalse(work.isDone());
+            verify(phone, never()).tap(any());
+            verify(phone, never()).back();
+            verify(phone, never()).swipe(anyInt(), anyInt(), anyBoolean());
+            verify(phone, times(3)).read();
+            page.set(new PageModel.Page(List.of(line("今日速赚200淘金币", 500, 250)), 1080, 2340));
+            assertTrue(gate.resume());
+            work.get(2, TimeUnit.SECONDS);
+            verify(phone, times(1)).awaitUser(anyString());
+            verify(phone).log(contains("本轮结束"));
+        } finally { gate.stop(); thread.interrupt(); thread.join(2000); }
+    }
+    @Test public void stopWhileWaitingDoesNotReturnToTaobaoOrClickAnything() throws Exception {
+        CoinService phone = mock(CoinService.class);
+        when(phone.foreground()).thenReturn(PageModel.TAOBAO);
+        when(phone.read()).thenThrow(new CoinService.Attention("请手动打开金币任务页"));
+        ManualPause gate = new ManualPause();
+        CountDownLatch paused = new CountDownLatch(1);
+        doAnswer(invocation -> { gate.awaitResume(paused::countDown); return null; }).when(phone).awaitUser(anyString());
+        FutureTask<Void> work = new FutureTask<>(() -> { new CoinEngine(phone).run(); return null; });
+        Thread thread = new Thread(work);
+        thread.start();
+        try {
+            assertTrue(paused.await(2, TimeUnit.SECONDS));
+            gate.stop();
+            try { work.get(2, TimeUnit.SECONDS); fail("Stop must interrupt the waiting engine"); }
+            catch (ExecutionException expected) { assertTrue(expected.getCause() instanceof InterruptedException); }
+            verify(phone, never()).tap(any());
+            verify(phone, never()).back();
+            verify(phone, never()).swipe(anyInt(), anyInt(), anyBoolean());
+            verify(phone, never()).log(contains("本轮结束"));
+        } finally { gate.stop(); thread.interrupt(); thread.join(2000); }
+    }
+    @Test public void continueRechecksVerificationAndPausesAgainIfUnresolved() throws Exception {
+        CoinService phone = mock(CoinService.class);
+        when(phone.foreground()).thenReturn(PageModel.TAOBAO);
+        PageModel.Page ready = new PageModel.Page(List.of(line("今日速赚200淘金币", 500, 250)), 1080, 2340);
+        when(phone.read()).thenThrow(new CoinService.Attention("手机需要完成验证"))
+            .thenThrow(new CoinService.Attention("手机需要完成验证")).thenReturn(ready);
+        new CoinEngine(phone).run();
+        verify(phone, times(2)).awaitUser("手机需要完成验证");
+        verify(phone, never()).tap(any());
+        verify(phone, never()).back();
+    }
+    @Test public void verificationResumePreservesPreviouslySkippedTasksAndRetryBudget() throws Exception {
+        CoinService phone = mock(CoinService.class);
+        when(phone.foreground()).thenReturn(PageModel.TAOBAO);
+        AtomicReference<PageModel.Page> current = new AtomicReference<>(panel(true));
+        AtomicBoolean verification = new AtomicBoolean(), completed = new AtomicBoolean();
+        java.util.concurrent.atomic.AtomicInteger goodClicks = new java.util.concurrent.atomic.AtomicInteger();
+        when(phone.read()).thenAnswer(invocation -> {
+            if (verification.get()) throw new CoinService.Attention("手机需要完成验证");
+            return current.get();
+        });
+        doAnswer(invocation -> {
+            PageModel.Line tapped = invocation.getArgument(0);
+            if (tapped.y < 1000) current.set(new PageModel.Page(List.of(line("活动页面", 500, 900)), 1080, 2340));
+            else if (goodClicks.incrementAndGet() == 1) verification.set(true);
+            else { completed.set(true); current.set(new PageModel.Page(List.of(line("任务已完成", 900, 1800)), 1080, 2340)); }
+            return null;
+        }).when(phone).tap(any());
+        doAnswer(invocation -> { verification.set(false); current.set(panel(true)); return null; }).when(phone).awaitUser(anyString());
+        doAnswer(invocation -> { current.set(panel(!completed.get())); return null; }).when(phone).back();
+        new CoinEngine(phone).run();
+        verify(phone, times(3)).tap(any());
+        verify(phone, times(1)).awaitUser("手机需要完成验证");
+        verify(phone).log(contains("观察到 1 次进度更新，跳过 1 项"));
     }
 }

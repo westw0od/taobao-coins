@@ -12,6 +12,8 @@ import android.hardware.HardwareBuffer;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.PowerManager;
+import android.os.VibrationEffect;
+import android.os.Vibrator;
 import android.view.Display;
 import android.view.Gravity;
 import android.view.WindowManager;
@@ -19,6 +21,8 @@ import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
 import android.view.accessibility.AccessibilityWindowInfo;
 import android.widget.Button;
+import android.widget.LinearLayout;
+import android.widget.TextView;
 import android.widget.Toast;
 
 import com.google.android.gms.tasks.Tasks;
@@ -39,8 +43,10 @@ import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /** All screenshots stay in memory. Gestures require a fresh Taobao focus check. */
@@ -50,12 +56,15 @@ public class CoinService extends AccessibilityService {
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final AtomicBoolean busy = new AtomicBoolean();
+    private final ManualPause manualPause = new ManualPause();
     private final List<String> messages = new ArrayList<>();
     private volatile boolean stopped;
     private volatile Thread runThread;
     private volatile String state = "未运行";
     private TextRecognizer recognizer;
-    private Button stopOverlay;
+    private LinearLayout overlay;
+    private Button continueOverlay;
+    private TextView overlayMessage;
     private PowerManager.WakeLock wakeLock;
     private long nextScreenshotAt;
 
@@ -79,6 +88,10 @@ public class CoinService extends AccessibilityService {
         super.onDestroy();
     }
     public boolean isRunning() { return busy.get(); }
+    public boolean isPaused() { return manualPause.isPaused(); }
+    public void resumeRun() {
+        if (manualPause.resume()) updateOverlay();
+    }
     public String status() { return state; }
     public synchronized String logText() { return String.join("\n", messages); }
     public synchronized void log(String text) {
@@ -89,19 +102,18 @@ public class CoinService extends AccessibilityService {
     }
     public void requestStop() {
         stopped = true;
+        manualPause.stop();
         Thread thread = runThread;
         if (thread != null) thread.interrupt();
     }
     public void startRun() {
         if (!busy.compareAndSet(false, true)) return;
         stopped = false;
+        manualPause.reset();
         synchronized (this) { messages.clear(); }
         log("准备打开淘宝");
         showOverlay();
-        PowerManager power = getSystemService(PowerManager.class);
-        // Release on every exit. The one-hour timeout also bounds battery use.
-        wakeLock = power.newWakeLock(PowerManager.SCREEN_DIM_WAKE_LOCK, getPackageName() + ":coins");
-        wakeLock.acquire(60 * 60 * 1000L);
+        acquireWakeLock();
         worker.execute(() -> {
             runThread = Thread.currentThread();
             try {
@@ -115,6 +127,7 @@ public class CoinService extends AccessibilityService {
             } catch (Exception e) {
                 log("运行已停止：" + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage()));
             } finally {
+                manualPause.stop();
                 if (recognizer != null) { recognizer.close(); recognizer = null; }
                 releaseWakeLock();
                 saveLog();
@@ -139,34 +152,82 @@ public class CoinService extends AccessibilityService {
         if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
         wakeLock = null;
     }
+    private synchronized void acquireWakeLock() {
+        if (wakeLock == null) wakeLock = getSystemService(PowerManager.class)
+            .newWakeLock(PowerManager.SCREEN_DIM_WAKE_LOCK, getPackageName() + ":coins");
+        if (!wakeLock.isHeld()) wakeLock.acquire(60 * 60 * 1000L);
+    }
+    void awaitUser(String reason) throws InterruptedException {
+        manualPause.awaitResume(() -> {
+            releaseWakeLock();
+            log("已暂停，等待手动处理：" + reason + "；完成后点“继续”");
+            saveLog();
+            main.post(() -> {
+                if (!manualPause.isPaused()) return;
+                updateOverlay();
+                try {
+                    Vibrator vibrator = getSystemService(Vibrator.class);
+                    if (vibrator != null && vibrator.hasVibrator())
+                        vibrator.vibrate(VibrationEffect.createWaveform(new long[]{0, 220, 140, 220}, -1));
+                } catch (RuntimeException ignored) { }
+                Toast.makeText(this, "已暂停：" + reason + "。处理后点继续。", Toast.LENGTH_LONG).show();
+            });
+        });
+        if (stopped || Thread.currentThread().isInterrupted()) throw new InterruptedException();
+        acquireWakeLock();
+        log("继续运行，重新检查金币任务页");
+        main.post(this::updateOverlay);
+    }
     private void showOverlay() {
-        if (stopOverlay != null) return;
-        stopOverlay = new Button(this);
+        if (overlay != null) return;
+        overlay = new LinearLayout(this);
+        overlay.setOrientation(LinearLayout.VERTICAL);
+        overlay.setPadding(8, 4, 8, 4);
+        overlay.setBackgroundColor(0xFFFFF7ED);
+        overlayMessage = new TextView(this);
+        overlayMessage.setText("请手动处理，完成后点继续");
+        overlayMessage.setTextSize(12);
+        overlayMessage.setTextColor(0xFF28251F);
+        overlay.addView(overlayMessage);
+        LinearLayout buttons = new LinearLayout(this);
+        overlay.addView(buttons);
+        continueOverlay = new Button(this);
+        continueOverlay.setText("继续");
+        continueOverlay.setOnClickListener(view -> resumeRun());
+        buttons.addView(continueOverlay);
+        Button stopOverlay = new Button(this);
         stopOverlay.setText("停止");
         stopOverlay.setTextColor(0xFFFFFFFF);
         stopOverlay.setBackgroundTintList(android.content.res.ColorStateList.valueOf(0xFFB34A12));
         stopOverlay.setOnClickListener(view -> requestStop());
-        int dp = (int) (getResources().getDisplayMetrics().density * 76);
-        WindowManager.LayoutParams params = new WindowManager.LayoutParams(dp, dp * 2 / 3,
+        buttons.addView(stopOverlay);
+        updateOverlay();
+        WindowManager.LayoutParams params = new WindowManager.LayoutParams(-2, -2,
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
             PixelFormat.TRANSLUCENT);
         params.gravity = Gravity.TOP | Gravity.END;
         params.y = (int) (getResources().getDisplayMetrics().density * 36);
-        try { getSystemService(WindowManager.class).addView(stopOverlay, params); }
-        catch (RuntimeException e) { stopOverlay = null; }
+        try { getSystemService(WindowManager.class).addView(overlay, params); }
+        catch (RuntimeException e) { overlay = null; }
+    }
+    private void updateOverlay() {
+        if (overlay == null) return;
+        boolean paused = manualPause.isPaused();
+        continueOverlay.setVisibility(paused ? android.view.View.VISIBLE : android.view.View.GONE);
+        overlayMessage.setVisibility(paused ? android.view.View.VISIBLE : android.view.View.GONE);
     }
     private void removeOverlay() {
-        if (stopOverlay == null) return;
-        try { getSystemService(WindowManager.class).removeView(stopOverlay); }
+        if (overlay == null) return;
+        try { getSystemService(WindowManager.class).removeView(overlay); }
         catch (RuntimeException ignored) { }
-        stopOverlay = null;
+        overlay = null;
     }
     void checkStopped() throws InterruptedException, Attention {
         if (stopped || Thread.currentThread().isInterrupted()) throw new InterruptedException();
         if (!getSystemService(PowerManager.class).isInteractive()
             || getSystemService(KeyguardManager.class).isKeyguardLocked())
-            throw new Attention("手机已锁屏，请解锁后重新开始");
+            throw new Attention("手机已锁屏，请解锁后点继续");
     }
     void waitMs(long milliseconds) throws InterruptedException, Attention {
         checkStopped();
@@ -210,7 +271,7 @@ public class CoinService extends AccessibilityService {
             waitMs(300);
             if (PageModel.TAOBAO.equals(foreground())) return;
         }
-        throw new Attention("淘宝未进入前台，请手动打开淘宝后重新开始");
+        throw new Attention("淘宝未进入前台，请手动打开淘宝后点继续");
     }
     void back() throws Exception {
         requireTaobao();
@@ -280,6 +341,11 @@ public class CoinService extends AccessibilityService {
             delivered = true;
             return bitmap;
         }
+        catch (ExecutionException e) {
+            if (e.getCause() instanceof Attention) throw (Attention) e.getCause();
+            throw e;
+        }
+        catch (TimeoutException e) { throw new Attention("截图超时，请检查手机页面后点继续"); }
         finally {
             // A late callback must recycle its image if this worker was stopped.
             if (!delivered && !future.cancel(false)) {
@@ -296,9 +362,11 @@ public class CoinService extends AccessibilityService {
         com.google.android.gms.tasks.Task<Text> recognition = null;
         try {
             int width = bitmap.getWidth(), height = bitmap.getHeight();
-            if (width > height) throw new Attention("请将手机切换为竖屏后重新开始");
+            if (width > height) throw new Attention("请将手机切换为竖屏后点继续");
             recognition = recognizer.process(InputImage.fromBitmap(bitmap, 0));
-            Text result = Tasks.await(recognition, 12, TimeUnit.SECONDS);
+            Text result;
+            try { result = Tasks.await(recognition, 12, TimeUnit.SECONDS); }
+            catch (TimeoutException e) { throw new Attention("本地识别超时，请检查手机页面后点继续"); }
             requireTaobao();
             List<PageModel.Line> lines = new ArrayList<>();
             for (Text.TextBlock block : result.getTextBlocks()) for (Text.Line line : block.getLines()) {

@@ -30,7 +30,7 @@ public class MainActivity extends Activity {
     private static final int INK = 0xFF28251F, MUTED = 0xFF70685F, ORANGE = 0xFFE66A22;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private TextView status, history, permission;
-    private Button start, stop;
+    private Button start, stop, resume;
     private final Runnable refresh = new Runnable() {
         @Override public void run() { update(); handler.postDelayed(this, 800); }
     };
@@ -78,10 +78,16 @@ public class MainActivity extends Activity {
 
         LinearLayout actions = card(root);
         actions.addView(heading("02  开始这一轮"));
-        actions.addView(text("只做免费的站内淘金币任务。跨 App、游戏、付款和分享邀请会跳过；验证或登录提示需手动处理。", 15, MUTED));
+        actions.addView(text("只做免费的站内淘金币任务。跨 App、游戏、付款和分享邀请会跳过；需要手动处理时震动并暂停，处理后点继续。", 15, MUTED));
         start = button("开始淘金币任务", true);
         start.setOnClickListener(view -> confirmStart());
         actions.addView(start);
+        resume = button("已处理，继续运行", true);
+        resume.setOnClickListener(view -> {
+            CoinService service = CoinService.current();
+            if (service != null) service.resumeRun();
+        });
+        actions.addView(resume);
         stop = button("停止运行", false);
         stop.setOnClickListener(view -> {
             CoinService service = CoinService.current();
@@ -115,7 +121,7 @@ public class MainActivity extends Activity {
             return;
         }
         new AlertDialog.Builder(this).setTitle("开始本轮任务？")
-            .setMessage("本轮运行会读取淘宝页面和屏幕截图，并自动点击、滑动。截图仅在内存中识别。\n\n请保持屏幕解锁，并暂时不要操作手机。遇到验证时程序会停止，可通过悬浮的“停止”按钮随时结束。")
+            .setMessage("本轮运行会读取淘宝页面和屏幕截图，并自动点击、滑动。截图仅在内存中识别。\n\n请保持屏幕解锁。需要手动处理时会震动并暂停，请完成验证或打开金币任务页后点“继续”；可通过悬浮的“停止”按钮随时结束。")
             .setNegativeButton("取消", null)
             .setPositiveButton("同意并开始", (dialog, which) -> service.startRun()).show();
     }
@@ -126,8 +132,11 @@ public class MainActivity extends Activity {
         permission.setText(service == null ? "● 无障碍尚未开启" : "● 无障碍已就绪");
         permission.setTextColor(service == null ? ORANGE : 0xFF26775E);
         boolean running = service != null && service.isRunning();
+        boolean paused = running && service.isPaused();
         start.setEnabled(!running);
         start.setText(service == null ? "先开启无障碍权限" : "开始淘金币任务");
+        resume.setVisibility(paused ? View.VISIBLE : View.GONE);
+        resume.setEnabled(paused);
         stop.setEnabled(running);
         String last = getSharedPreferences("state", MODE_PRIVATE).getString("last_status", "未运行");
         status.setText(getString(R.string.run_state, service == null ? last : service.status()));

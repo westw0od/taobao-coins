@@ -6,6 +6,7 @@ import java.util.Map;
 /** Bounded workflow: panel -> one free task -> panel -> verify progress. */
 final class CoinEngine {
     private final CoinService phone;
+    private long pausedNanos;
     CoinEngine(CoinService phone) { this.phone = phone; }
 
     private PageModel.Page openPanel() throws Exception {
@@ -29,72 +30,102 @@ final class CoinEngine {
                 // Give a loading page time to settle before any Back action.
                 if (++unreadable < 3) { phone.waitMs(800); continue; }
                 if (page.find("领淘金币") != null)
-                    throw new CoinService.Attention("金币入口被识别成整排图标，未点击。请手动打开淘金币任务页后重新开始");
-                if (++backs > 2) throw new CoinService.Attention("缺少明确导航入口，请手动打开淘金币任务页后重新开始");
+                    throw new CoinService.Attention("金币入口被识别成整排图标，未点击。请手动打开淘金币任务页");
+                if (++backs > 2) throw new CoinService.Attention("缺少明确导航入口，请手动打开淘金币任务页");
                 unreadable = 0;
                 phone.back();
             }
             phone.waitMs(700);
         }
-        throw new CoinService.Attention("没有找到金币任务面板，请手动打开淘宝的淘金币页面后重新开始");
+        throw new CoinService.Attention("没有找到金币任务面板，请手动打开淘宝的淘金币任务页");
+    }
+    private void waitForUser(String reason) throws InterruptedException {
+        long started = System.nanoTime();
+        try { phone.awaitUser(reason); }
+        finally { pausedNanos += System.nanoTime() - started; }
+    }
+    private PageModel.Page recoverPanel() throws Exception {
+        while (true) {
+            try { return openPanel(); }
+            catch (CoinService.Attention | CoinService.LeftTaobao | CoinService.SkipTask error) {
+                waitForUser(error.getMessage());
+            }
+        }
     }
     void run() throws Exception {
-        PageModel.Page page = openPanel();
-        for (int n = 0; n < 3; n++) phone.swipe(page.width, page.height, true);
-        page = phone.read();
+        PageModel.Page page = recoverPanel();
+        try {
+            for (int n = 0; n < 3; n++) phone.swipe(page.width, page.height, true);
+            page = phone.read();
+        } catch (CoinService.Attention | CoinService.LeftTaobao | CoinService.SkipTask error) {
+            waitForUser(error.getMessage());
+            page = recoverPanel();
+        }
         Map<String, Integer> attempts = new HashMap<>();
         int updated = 0, skipped = 0, idlePages = 0, performed = 0;
         int arrivalAttempts = 0;
         boolean expanded = false;
-        long deadline = System.nanoTime() + 45L * 60 * 1_000_000_000;
-        while (idlePages < 7 && performed < 100 && System.nanoTime() < deadline) {
-            phone.checkStopped();
-            if (!page.isPanel()) { page = openPanel(); continue; }
-            PageModel.Line arrival = page.exact("领取奖励");
-            if (arrival != null && arrivalAttempts < 3) {
-                boolean isArrival = false;
-                for (PageModel.Line line : page.lines)
-                    if (line.text.contains("任务到访") && Math.abs(line.y - arrival.y) < page.height * .04)
-                        isArrival = true;
-                if (isArrival) { arrivalAttempts++; phone.tap(arrival); page = phone.read(); continue; }
-            }
-            PageModel.Task task = null;
-            for (PageModel.Task candidate : page.tasks()) if (attempts.getOrDefault(candidate.title, 0) < 2) {
-                task = candidate; break;
-            }
-            if (task == null) {
-                PageModel.Line expand = page.exact("展开");
-                if (expand != null && page.find("更多金币等你赚") != null && !expanded) {
-                    expanded = true;
-                    phone.tap(expand);
-                }
-                else { idlePages++; phone.swipe(page.width, page.height, false); }
-                page = phone.read();
-                continue;
-            }
-            idlePages = 0;
-            performed++;
-            attempts.put(task.title, attempts.getOrDefault(task.title, 0) + 1);
-            phone.log("执行：" + task.title);
-            boolean failed = false;
+        long deadline = System.nanoTime() - pausedNanos + 45L * 60 * 1_000_000_000;
+        while (idlePages < 7 && performed < 100 && System.nanoTime() - pausedNanos < deadline) {
             try {
-                phone.tap(task.button);
-                switch (task.kind) {
-                    case "quiz": if (!quiz()) throw new CoinService.SkipTask("答题页面暂不支持或没有重答入口"); break;
-                    case "products": products(); break;
-                    default: browse(task.duration);
+                phone.checkStopped();
+                if (!page.isPanel()) { page = recoverPanel(); continue; }
+                PageModel.Line arrival = page.exact("领取奖励");
+                if (arrival != null && arrivalAttempts < 3) {
+                    boolean isArrival = false;
+                    for (PageModel.Line line : page.lines)
+                        if (line.text.contains("任务到访") && Math.abs(line.y - arrival.y) < page.height * .04)
+                            isArrival = true;
+                    if (isArrival) { arrivalAttempts++; phone.tap(arrival); page = phone.read(); continue; }
                 }
-            } catch (CoinService.SkipTask | CoinService.LeftTaobao error) {
-                failed = true;
-                skipped++;
-                attempts.put(task.title, 2);
-                phone.log("跳过：" + task.title + "（" + error.getMessage() + "）");
+                PageModel.Task task = null;
+                for (PageModel.Task candidate : page.tasks()) if (attempts.getOrDefault(candidate.title, 0) < 2) {
+                    task = candidate; break;
+                }
+                if (task == null) {
+                    PageModel.Line expand = page.exact("展开");
+                    if (expand != null && page.find("更多金币等你赚") != null && !expanded) {
+                        expanded = true;
+                        phone.tap(expand);
+                    }
+                    else { idlePages++; phone.swipe(page.width, page.height, false); }
+                    page = phone.read();
+                    continue;
+                }
+                idlePages = 0;
+                performed++;
+                attempts.put(task.title, attempts.getOrDefault(task.title, 0) + 1);
+                phone.log("执行：" + task.title);
+                boolean failed = false;
+                try {
+                    phone.tap(task.button);
+                    switch (task.kind) {
+                        case "quiz": if (!quiz()) throw new CoinService.SkipTask("答题页面暂不支持或没有重答入口"); break;
+                        case "products": products(); break;
+                        default: browse(task.duration);
+                    }
+                } catch (CoinService.SkipTask | CoinService.LeftTaobao error) {
+                    failed = true;
+                    skipped++;
+                    attempts.put(task.title, 2);
+                    phone.log("跳过：" + task.title + "（" + error.getMessage() + "）");
+                } catch (CoinService.Attention error) {
+                    // Manual intervention does not consume a task retry or discard
+                    // the attempts/progress already accumulated in this run.
+                    attempts.put(task.title, attempts.get(task.title) - 1);
+                    performed--;
+                    waitForUser(error.getMessage());
+                }
+                page = recoverPanel();
+                boolean remains = false;
+                for (PageModel.Task remaining : page.tasks()) if (remaining.title.equals(task.title)) remains = true;
+                if (!failed && !remains) { updated++; phone.log("已观察到任务进度更新"); }
+                else if (!failed) phone.log("进度暂未更新，最多尝试两次");
+            } catch (CoinService.Attention | CoinService.LeftTaobao | CoinService.SkipTask error) {
+                waitForUser(error.getMessage());
+                page = recoverPanel();
+                idlePages = 0;
             }
-            page = openPanel();
-            boolean remains = false;
-            for (PageModel.Task remaining : page.tasks()) if (remaining.title.equals(task.title)) remains = true;
-            if (!failed && !remains) { updated++; phone.log("已观察到任务进度更新"); }
-            else if (!failed) phone.log("进度暂未更新，最多尝试两次");
         }
         phone.log("本轮结束：观察到 " + updated + " 次进度更新，跳过 " + skipped + " 项；奖励以淘宝到账为准");
     }

@@ -73,9 +73,9 @@ public final class PageModel {
         }
         public String verification() {
             if (find("验证码", "滑块验证", "拖动滑块", "向右滑动验证", "向右滑动完成验证",
-                     "安全验证", "请完成验证") != null) return "手机需要完成验证，请手动处理后重新开始";
+                     "安全验证", "请完成验证") != null) return "手机需要完成验证，请手动处理后点继续";
             if (exact("亲，请登录", "登录/注册", "登录后继续", "登录后领取") != null)
-                return "请先在淘宝中登录，再重新开始";
+                return "请先在淘宝中登录，再点继续";
             return null;
         }
         public boolean rewardComplete() {
