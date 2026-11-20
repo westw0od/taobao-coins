@@ -141,5 +141,62 @@ class QuizTests(unittest.TestCase):
         )
 
 
+class TaskFailureTests(unittest.TestCase):
+    def test_missing_product_entry_is_a_local_failure(self):
+        with patch.object(runner, "read_screen", return_value=snapshot(("活动页面", 400, 500))):
+            with self.assertRaisesRegex(runner.TaskUnavailable, "未显示奖励入口"):
+                runner.click_reward_products(Mock())
+
+    def test_verification_in_product_page_still_requires_attention(self):
+        with patch.object(runner, "read_screen", side_effect=NeedsAttention("手机需要完成验证")):
+            with self.assertRaises(NeedsAttention):
+                runner.click_reward_products(Mock())
+
+    def test_run_continues_after_local_failure_but_stops_on_verification(self):
+        panel = snapshot(("今日速赚200淘金币", 500, 250))
+        button = screen.Line("去完成", 950, 750, (900, 710, 1000, 780))
+        products = screen.Task("点击3个商品", "点击3个商品立得30金币", button, 10, "products")
+        other = screen.Task("浏览任务", "浏览15秒", button, 20, "browse")
+        for error in (runner.TaskUnavailable("商品点击任务未显示奖励入口"),
+                      ExternalAppOpened("微信"), NeedsAttention("手机需要完成验证")):
+            with self.subTest(error=type(error).__name__):
+                device = Mock()
+                completed = []
+
+                def tasks(*_):
+                    # The unavailable row disappears after recovery, which must
+                    # not be mistaken for a successful progress update.
+                    if product_action.called:
+                        return [] if completed else [other]
+                    return [products, other]
+
+                with (
+                    patch.object(runner, "open_panel", return_value=panel) as recover,
+                    patch.object(runner, "read_screen", return_value=panel),
+                    patch.object(runner, "require_taobao"),
+                    patch.object(runner, "click_line"),
+                    patch.object(runner, "browse_tasks", side_effect=tasks),
+                    patch.object(runner, "click_reward_products", side_effect=error) as product_action,
+                    patch.object(runner, "browse", side_effect=lambda *_: completed.append(True)) as browse,
+                    patch.object(runner.time, "sleep"),
+                ):
+                    if isinstance(error, NeedsAttention):
+                        with self.assertRaises(NeedsAttention):
+                            runner.run(device)
+                        browse.assert_not_called()
+                        self.assertEqual(recover.call_count, 1)
+                    else:
+                        result = runner.run(device)
+                        browse.assert_called_once()
+                        self.assertEqual(result["progress_updates"], 1)
+                        if isinstance(error, runner.TaskUnavailable):
+                            self.assertEqual(result["unavailable_tasks_skipped"], [
+                                {"title": products.title, "reason": str(error)},
+                            ])
+                        else:
+                            self.assertEqual(result["external_tasks_skipped"], [products.title])
+                    product_action.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()

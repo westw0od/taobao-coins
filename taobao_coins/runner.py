@@ -11,6 +11,10 @@ from .android import ExternalAppOpened, NeedsAttention, ensure_taobao, require_t
 from .screen import browse_reward_complete, browse_tasks, click_line, find_line, read_screen
 
 
+class TaskUnavailable(RuntimeError):
+    """A task's expected controls are missing; other tasks may still run."""
+
+
 def is_panel(lines, height):
     headings = ("今日速赚", "更多金币等你赚", "赚金币抵钱", "今日累计奖励")
     return any(line.y < height * 0.19 and any(word in line.text for word in headings) for line in lines)
@@ -113,15 +117,15 @@ def click_reward_products(device):
             return
         button = find_line(lines, ("点我得淘金币",))
         if button is None:
-            raise NeedsAttention("商品点击任务未显示奖励入口，请检查手机页面。")
+            raise TaskUnavailable("商品点击任务未显示奖励入口")
         click_line(device, button)
         product, _, _ = read_screen(device)
         if not find_line(product, ("领券购买", "加入购物车", "立即购买")):
-            raise NeedsAttention("商品详情页暂未加载完成，请检查手机页面后重新运行。")
+            raise TaskUnavailable("商品详情页未识别到预期内容")
         require_taobao(device)
         device.press("back")
         time.sleep(1)
-    raise NeedsAttention("商品点击任务经过五次检查仍未显示完成，请在手机上检查进度。")
+    raise TaskUnavailable("商品点击任务经过五次检查仍未显示完成")
 
 
 def answer_quiz(device):
@@ -194,6 +198,7 @@ def run(device, android_user=0):
     attempts = {}
     updated = 0
     external = []
+    unavailable = []
     idle_pages = 0
     while True:
         lines, width, height = screen
@@ -213,6 +218,7 @@ def run(device, android_user=0):
         if task:
             attempts[task.title] = attempts.get(task.title, 0) + 1
             started = time.monotonic()
+            skipped = False
             print(f"执行免费任务 {task.description}", flush=True)
             try:
                 click_line(device, task.button)
@@ -223,13 +229,21 @@ def run(device, android_user=0):
                         attempts[task.title] = 2
                 else:
                     browse(device, task.duration)
+            except TaskUnavailable as error:
+                print(f"跳过本项任务 {task.title}：{error}，继续其他任务", flush=True)
+                attempts[task.title] = 2
+                unavailable.append({"title": task.title, "reason": str(error)})
+                skipped = True
             except ExternalAppOpened as error:
                 print(f"{error}，返回淘宝并保留本项任务", flush=True)
                 attempts[task.title] = 2
                 external.append(task.title)
+                skipped = True
             screen = open_panel(device, android_user)
             remaining = browse_tasks(*screen)
-            if not any(item.title == task.title for item in remaining):
+            if skipped:
+                print(f"本项已跳过，未确认完成 {task.title}", flush=True)
+            elif not any(item.title == task.title for item in remaining):
                 updated += 1
                 print(f"进度已更新 {task.title}", flush=True)
             else:
@@ -251,4 +265,8 @@ def run(device, android_user=0):
         time.sleep(1)
         screen = read_screen(device)
     print(f"扫描结束，本轮观察到 {updated} 次任务进度更新。奖励以手机实际到账为准。", flush=True)
-    return {"progress_updates": updated, "external_tasks_skipped": external}
+    return {
+        "progress_updates": updated,
+        "external_tasks_skipped": external,
+        "unavailable_tasks_skipped": unavailable,
+    }
