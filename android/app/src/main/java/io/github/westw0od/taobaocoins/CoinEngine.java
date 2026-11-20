@@ -10,17 +10,30 @@ final class CoinEngine {
 
     private PageModel.Page openPanel() throws Exception {
         if (!PageModel.TAOBAO.equals(phone.foreground())) phone.launchTaobao();
+        Map<String, Integer> clicked = new HashMap<>();
+        int backs = 0, unreadable = 0;
         for (int step = 0; step < 12; step++) {
             PageModel.Page page = phone.read();
             if (page.isPanel()) return page;
-            PageModel.Line entry = page.exact("赚更多金币", "签到领金币");
-            if (entry == null) entry = page.find("领淘金币");
-            if (entry == null && page.find("消费券") != null) entry = page.exact("关闭按钮");
-            if (entry == null) entry = page.exact("我的淘宝");
+            PageModel.Line entry = page.navigation("赚更多金币", "签到领金币", "领淘金币");
+            if (entry == null && page.find("消费券") != null) entry = page.navigation("关闭按钮");
+            if (entry == null) entry = page.navigation("我的淘宝");
             if (entry != null) {
+                int count = clicked.getOrDefault(entry.text, 0);
+                if (count >= 2) throw new CoinService.Attention("入口“" + entry.text + "”点击后仍未找到任务面板，请手动打开金币任务页");
+                clicked.put(entry.text, count + 1);
+                unreadable = 0;
                 phone.log("打开入口：" + entry.text);
                 phone.tap(entry);
-            } else phone.back();
+            } else {
+                // Give a loading page time to settle before any Back action.
+                if (++unreadable < 3) { phone.waitMs(800); continue; }
+                if (page.find("领淘金币") != null)
+                    throw new CoinService.Attention("金币入口被识别成整排图标，未点击。请手动打开淘金币任务页后重新开始");
+                if (++backs > 2) throw new CoinService.Attention("缺少明确导航入口，请手动打开淘金币任务页后重新开始");
+                unreadable = 0;
+                phone.back();
+            }
             phone.waitMs(700);
         }
         throw new CoinService.Attention("没有找到金币任务面板，请手动打开淘宝的淘金币页面后重新开始");

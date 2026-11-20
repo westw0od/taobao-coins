@@ -81,4 +81,37 @@ public class CoinEngineTest {
         verify(phone, times(3)).tap(any());
         verify(phone).log(contains("本轮结束"));
     }
+    @Test public void loggedJoinedRowIsNeverTappedOrBackedOutOf() throws Exception {
+        CoinService phone = mock(CoinService.class);
+        when(phone.foreground()).thenReturn(PageModel.TAOBAO);
+        when(phone.read()).thenReturn(new PageModel.Page(List.of(new PageModel.Line(
+            "淘工厂红包签到领淘金币芭芭农场菜鸟驿站", 30, 900, 1050, 955)), 1080, 2340));
+        try { new CoinEngine(phone).run(); fail("A joined icon row is not a button"); }
+        catch (CoinService.Attention expected) { assertTrue(expected.getMessage().contains("整排图标")); }
+        verify(phone, never()).tap(any());
+        verify(phone, never()).back();
+    }
+    @Test public void narrowCoinEntryIsTappedInsteadOfJoinedRow() throws Exception {
+        CoinService phone = mock(CoinService.class);
+        when(phone.foreground()).thenReturn(PageModel.TAOBAO);
+        PageModel.Line coin = new PageModel.Line("领淘金币", 440, 900, 580, 955);
+        PageModel.Page home = new PageModel.Page(List.of(new PageModel.Line(
+            "红包签到领淘金币芭芭农场菜鸟驿站", 30, 900, 1050, 955), coin), 1080, 2340);
+        when(phone.read()).thenReturn(home, panel(false), panel(false));
+        doThrow(new InterruptedException()).when(phone).checkStopped();
+        try { new CoinEngine(phone).run(); fail("Stop after checking navigation"); }
+        catch (InterruptedException expected) { }
+        verify(phone).tap(same(coin));
+        verify(phone).log("打开入口：领淘金币");
+        verify(phone, never()).back();
+    }
+    @Test public void unchangedNavigationEntryIsNotTappedForever() throws Exception {
+        CoinService phone = mock(CoinService.class);
+        when(phone.foreground()).thenReturn(PageModel.TAOBAO);
+        when(phone.read()).thenReturn(new PageModel.Page(List.of(line("领淘金币", 500, 900)), 1080, 2340));
+        try { new CoinEngine(phone).run(); fail("Unchanged navigation must stop"); }
+        catch (CoinService.Attention expected) { assertTrue(expected.getMessage().contains("点击后")); }
+        verify(phone, times(2)).tap(any());
+        verify(phone, never()).back();
+    }
 }

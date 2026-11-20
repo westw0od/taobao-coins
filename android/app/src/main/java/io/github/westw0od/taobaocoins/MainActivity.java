@@ -5,6 +5,7 @@ import android.app.AlertDialog;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Intent;
+import android.net.Uri;
 import android.content.res.ColorStateList;
 import android.graphics.Insets;
 import android.graphics.Typeface;
@@ -67,7 +68,11 @@ public class MainActivity extends Activity {
         Button accessibility = button("开启 / 管理无障碍权限", false);
         accessibility.setOnClickListener(view -> startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)));
         setup.addView(accessibility);
-        TextView settingsHelp = text("若系统提示“受限制的设置”：进入应用信息 → 右上角菜单 → 允许受限制的设置，再回来开启无障碍。不同系统入口可能不同。", 12, MUTED);
+        Button appInfo = button("打开应用信息（处理受限制设置）", false);
+        appInfo.setOnClickListener(view -> startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+            Uri.parse("package:" + getPackageName()))));
+        setup.addView(appInfo);
+        TextView settingsHelp = text("若无障碍列表中的本应用是灰色，请先点击它并关闭系统提示，再打开应用信息 → 右上角菜单 → 允许限制性设置，按系统要求验证身份，然后回到无障碍开启服务。", 12, MUTED);
         settingsHelp.setPadding(0, dp(8), 0, 0);
         setup.addView(settingsHelp);
 
@@ -103,7 +108,10 @@ public class MainActivity extends Activity {
     private void confirmStart() {
         CoinService service = CoinService.current();
         if (service == null) {
-            Toast.makeText(this, "请先开启“淘金币助手”的无障碍服务", Toast.LENGTH_LONG).show();
+            new AlertDialog.Builder(this).setTitle("先开启无障碍服务")
+                .setMessage("在系统辅助功能 → 已安装的应用程序中开启“淘金币助手”。如果是灰色，请先按页面说明允许限制性设置。")
+                .setNegativeButton("取消", null)
+                .setPositiveButton("去设置", (dialog, which) -> startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))).show();
             return;
         }
         new AlertDialog.Builder(this).setTitle("开始本轮任务？")
@@ -118,7 +126,8 @@ public class MainActivity extends Activity {
         permission.setText(service == null ? "● 无障碍尚未开启" : "● 无障碍已就绪");
         permission.setTextColor(service == null ? ORANGE : 0xFF26775E);
         boolean running = service != null && service.isRunning();
-        start.setEnabled(service != null && !running);
+        start.setEnabled(!running);
+        start.setText(service == null ? "先开启无障碍权限" : "开始淘金币任务");
         stop.setEnabled(running);
         String last = getSharedPreferences("state", MODE_PRIVATE).getString("last_status", "未运行");
         status.setText(getString(R.string.run_state, service == null ? last : service.status()));

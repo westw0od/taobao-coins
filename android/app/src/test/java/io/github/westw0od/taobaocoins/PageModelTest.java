@@ -60,4 +60,43 @@ public class PageModelTest {
         assertTrue(page(line("今日速赚200淘金币", 500, 250)).isPanel());
         assertFalse(page(line("今日速赚200淘金币", 500, 1500)).isPanel());
     }
+    @Test public void navigationNeverUsesJoinedIconRow() {
+        PageModel.Page home = page(new PageModel.Line("淘工厂红包签到领淘金币芭芭农场菜鸟驿站", 30, 900, 1050, 955));
+        assertNotNull(home.find("领淘金币"));
+        assertNull(home.navigation("领淘金币"));
+        assertFalse(PageModel.isNavigationLabel("红包签到领淘金币芭芭农场菜鸟驿站"));
+    }
+    @Test public void exactNavigationPrefersSmallControlAndRejectsWideParent() {
+        PageModel.Line parent = new PageModel.Line("领淘金币", 0, 700, 1080, 1100);
+        PageModel.Line control = new PageModel.Line("领淘金币", 430, 900, 570, 955);
+        assertNull(page(parent).navigation("领淘金币"));
+        assertSame(control, page(parent, control).navigation("领淘金币"));
+    }
+    @Test public void ocrFragmentsKeepOnlyActualLabelBounds() {
+        List<PageModel.Line> tokens = List.of(
+            new PageModel.Line("红包签到", 160, 900, 300, 950),
+            new PageModel.Line("领淘", 440, 900, 510, 950),
+            new PageModel.Line("金币", 511, 900, 581, 950),
+            new PageModel.Line("芭芭农场", 700, 900, 860, 950));
+        List<PageModel.Line> found = PageModel.navigationFragments(tokens, 1080, 2340);
+        assertEquals(1, found.size());
+        assertEquals("领淘金币", found.get(0).text);
+        assertEquals(440f, found.get(0).left, .01f);
+        assertEquals(581f, found.get(0).right, .01f);
+    }
+    @Test public void fragmentsAcrossDifferentRowsOrDistantIconsAreNotCombined() {
+        assertTrue(PageModel.navigationFragments(List.of(line("领淘", 300, 900), line("金币", 800, 900)), 1080, 2340).isEmpty());
+        assertTrue(PageModel.navigationFragments(List.of(line("领淘", 300, 900), line("金币", 360, 1200)), 1080, 2340).isEmpty());
+    }
+    @Test public void characterBoxesLocateLabelInsideMergedOcrText() {
+        List<PageModel.Line> symbols = List.of(
+            new PageModel.Line("红", 140, 900, 170, 940), new PageModel.Line("包", 172, 900, 202, 940),
+            new PageModel.Line("领", 440, 900, 470, 940), new PageModel.Line("淘", 472, 900, 502, 940),
+            new PageModel.Line("金", 504, 900, 534, 940), new PageModel.Line("币", 536, 900, 566, 940),
+            new PageModel.Line("芭", 700, 900, 730, 940));
+        List<PageModel.Line> found = PageModel.navigationFragments(symbols, 1080, 2340);
+        assertEquals(1, found.size());
+        assertEquals("领淘金币", found.get(0).text);
+        assertEquals(503f, found.get(0).x, .01f);
+    }
 }

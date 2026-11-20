@@ -306,16 +306,30 @@ public class CoinService extends AccessibilityService {
                 // ML Kit can join a title and its button into a single OCR line.
                 StringBuilder leftText = new StringBuilder();
                 Rect leftBounds = null;
+                List<PageModel.Line> fragments = new ArrayList<>();
+                List<PageModel.Line> symbols = new ArrayList<>();
                 for (Text.Element element : line.getElements()) {
                     Rect bounds = element.getBoundingBox();
                     if (bounds == null) continue;
                     String word = element.getText().replaceAll("\\s+", "");
+                    fragments.add(new PageModel.Line(word, bounds.left, bounds.top, bounds.right, bounds.bottom));
+                    // Character boxes locate a label even when ML Kit joins all
+                    // icons into one element. Do not estimate positions by text length.
+                    for (Text.Symbol symbol : element.getSymbols()) {
+                        Rect box = symbol.getBoundingBox();
+                        if (box != null && !symbol.getText().trim().isEmpty())
+                            symbols.add(new PageModel.Line(symbol.getText(), box.left, box.top, box.right, box.bottom));
+                    }
                     if (PageModel.isTaskAction(word)) addLine(lines, word, bounds);
                     if (bounds.centerX() < width * .75) {
                         leftText.append(word);
                         if (leftBounds == null) leftBounds = new Rect(bounds); else leftBounds.union(bounds);
                     }
                 }
+                fragments.addAll(PageModel.navigationFragments(symbols, width, height));
+                for (PageModel.Line navigation : PageModel.navigationFragments(fragments, width, height))
+                    addLine(lines, navigation.text, new Rect(Math.round(navigation.left), Math.round(navigation.top),
+                        Math.round(navigation.right), Math.round(navigation.bottom)));
                 if (leftBounds != null && !leftText.toString().equals(line.getText().replaceAll("\\s+", "")))
                     addLine(lines, leftText.toString(), leftBounds);
             }
@@ -337,11 +351,14 @@ public class CoinService extends AccessibilityService {
         Rect bounds = new Rect(); node.getBoundsInScreen(bounds);
         CharSequence description = node.getContentDescription();
         CharSequence text = node.getText();
-        String word = text != null ? text.toString() : description != null ? description.toString() : "";
         // Only current native navigation controls; never old WebView task text.
-        if (bounds.centerX() >= 0 && bounds.centerX() < width && bounds.centerY() >= 0 && bounds.centerY() < height)
-            for (String navigation : new String[]{"领淘金币", "我的淘宝", "关闭按钮"})
-                if (word.contains(navigation)) addLine(lines, navigation, bounds);
+        for (CharSequence value : new CharSequence[]{text, description}) {
+            if (value == null) continue;
+            String word = value.toString().replaceAll("\\s+", "");
+            if (!word.equals("领淘金币") && !word.equals("我的淘宝") && !word.equals("关闭按钮")) continue;
+            PageModel.Line candidate = new PageModel.Line(word, bounds.left, bounds.top, bounds.right, bounds.bottom);
+            if (PageModel.validNavigationBounds(candidate, width, height)) addLine(lines, word, bounds);
+        }
         for (int n = 0; n < node.getChildCount(); n++) collectNative(node.getChild(n), lines, depth + 1, width, height);
     }
     private static void addLine(List<PageModel.Line> lines, String text, Rect bounds) {

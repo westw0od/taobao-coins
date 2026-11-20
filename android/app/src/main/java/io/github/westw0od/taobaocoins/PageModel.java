@@ -27,6 +27,7 @@ public final class PageModel {
     );
     private static final Pattern SECONDS = Pattern.compile("浏览(\\d{1,2})(?:秒|[sS])");
     private static final Pattern PROGRESS = Pattern.compile("[(（](\\d+)/(\\d+)[)）]");
+    private static final Set<String> NAVIGATION = Set.of("领淘金币", "我的淘宝", "关闭按钮", "赚更多金币", "签到领金币");
 
     public static final class Line {
         public final String text;
@@ -52,6 +53,16 @@ public final class PageModel {
         public Line exact(String... words) {
             for (String word : words) for (Line line : lines)
                 if (line.text.equals(word)) return line;
+            return null;
+        }
+        public Line navigation(String... labels) {
+            // A joined OCR row or a full-width accessibility parent is never a button.
+            for (String label : labels) {
+                Line best = null;
+                for (Line line : lines) if (line.text.equals(label) && validNavigationBounds(line, width, height))
+                    if (best == null || area(line) < area(best)) best = line;
+                if (best != null) return best;
+            }
             return null;
         }
         public boolean isPanel() {
@@ -122,6 +133,35 @@ public final class PageModel {
 
     public static boolean isTaskAction(String text) {
         return ACTIONS.contains(text) || text.matches("[币市]?\\+\\d+");
+    }
+    public static boolean isNavigationLabel(String text) { return NAVIGATION.contains(text.replaceAll("\\s+", "")); }
+    public static boolean validNavigationBounds(Line line, int width, int height) {
+        return line.left >= 0 && line.top >= 0 && line.right <= width && line.bottom <= height
+            && line.right > line.left && line.bottom > line.top
+            && line.right - line.left <= width * .65 && line.bottom - line.top <= height * .18;
+    }
+    private static float area(Line line) { return (line.right - line.left) * (line.bottom - line.top); }
+    public static List<Line> navigationFragments(List<Line> fragments, int width, int height) {
+        List<Line> found = new ArrayList<>();
+        for (int start = 0; start < fragments.size(); start++) {
+            Line first = fragments.get(start), previous = first;
+            StringBuilder text = new StringBuilder();
+            float left = first.left, top = first.top, right = first.right, bottom = first.bottom;
+            for (int end = start; end < Math.min(start + 8, fragments.size()); end++) {
+                Line next = fragments.get(end);
+                float rowHeight = Math.max(previous.bottom - previous.top, next.bottom - next.top);
+                if (end > start && (Math.abs(next.y - previous.y) > rowHeight * .6
+                    || next.left < previous.right - rowHeight * .2 || next.left - previous.right > rowHeight * .9)) break;
+                text.append(next.text);
+                left = Math.min(left, next.left); top = Math.min(top, next.top);
+                right = Math.max(right, next.right); bottom = Math.max(bottom, next.bottom);
+                Line candidate = new Line(text.toString(), left, top, right, bottom);
+                if (isNavigationLabel(candidate.text) && validNavigationBounds(candidate, width, height)) found.add(candidate);
+                previous = next;
+                if (text.length() > 6) break;
+            }
+        }
+        return found;
     }
     public static boolean allowed(String text) {
         for (String term : EXTERNAL) if (text.toLowerCase(Locale.ROOT).contains(term.toLowerCase(Locale.ROOT))) return false;
