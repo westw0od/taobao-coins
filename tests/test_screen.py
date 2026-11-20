@@ -12,7 +12,8 @@ from taobao_coins.android import ExternalAppOpened, NeedsAttention
 class ScreenTests(unittest.TestCase):
     def setUp(self):
         self.device = Mock()
-        self.device.app_current.return_value = {"package": "com.taobao.taobao"}
+        self.device.shell.return_value.exit_code = 0
+        self.device.shell.return_value.output = "mCurrentFocus=Window{abc u0 com.taobao.taobao/.Welcome}"
         self.device.screenshot.return_value = np.zeros((2340, 1080, 3), dtype=np.uint8)
         self.box = [[0, 0], [60, 0], [60, 20], [0, 20]]
 
@@ -36,7 +37,7 @@ class ScreenTests(unittest.TestCase):
         self.device.click.assert_not_called()
 
     def test_foreign_app_is_checked_before_clicking(self):
-        self.device.app_current.return_value = {"package": "com.tencent.mm"}
+        self.device.shell.return_value.output = "mCurrentFocus=Window{abc u0 com.tencent.mm/.Main}"
         line = screen.Line("去完成", 960, 745, (900, 710, 1000, 780))
         with self.assertRaises(ExternalAppOpened):
             screen.click_line(self.device, line)

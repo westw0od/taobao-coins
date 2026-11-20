@@ -5,6 +5,7 @@ Adapted from czl0325/coin11-tb. Modified for the coin-only public version.
 
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import time
@@ -59,7 +60,31 @@ def connect(serial=None, adb_path=None):
 
 
 def foreground(device):
-    return device.app_current().get("package")
+    # On recent Samsung Android versions `window windows` omits the focus.
+    # adbutils.app_current() then falls back to the last background activity.
+    # Read the actual focused window instead; never infer focus from task order.
+    for command in (["dumpsys", "window", "displays"], ["dumpsys", "window"]):
+        result = device.shell(command, timeout=10)
+        if result.exit_code:
+            continue
+        focus = re.search(r"^\s*mCurrentFocus=(.*)$", result.output, re.MULTILINE)
+        if focus:
+            component = re.search(r"\s([\w.]+)/[^\s}]+", focus.group(1))
+            # Null focus or a system overlay is not permission to click the app
+            # underneath it, even if that app is still marked as resumed.
+            return component.group(1) if component else None
+
+    result = device.shell(["dumpsys", "activity", "activities"], timeout=10)
+    if result.exit_code:
+        return None
+    for marker in ("topResumedActivity", "mResumedActivity", "ResumedActivity"):
+        activity = re.search(
+            rf"^\s*{marker}\s*[:=]\s*ActivityRecord\{{[^\n]*?\s([\w.]+)/",
+            result.output, re.MULTILINE,
+        )
+        if activity:
+            return activity.group(1)
+    return None
 
 
 def require_taobao(device):
@@ -69,16 +94,27 @@ def require_taobao(device):
 
 
 def ensure_taobao(device, android_user=0):
+    package = foreground(device)
     for _ in range(3):
-        if foreground(device) == TAOBAO:
+        if package == TAOBAO:
             return
         print("返回淘宝", flush=True)
         result = device.shell([
             "am", "start", "--user", str(android_user),
             "-n", f"{TAOBAO}/{ACTIVITY}",
         ])
-        if result.exit_code:
+        if result.exit_code or re.search(r"^\s*(?:Error:|Error type|Exception)", result.output, re.MULTILINE):
             raise NeedsAttention(f"启动淘宝失败，请确认指定安卓用户已安装淘宝\n{result.output}")
-        time.sleep(2)
-    if foreground(device) != TAOBAO:
-        raise NeedsAttention("连续三次启动后仍未进入淘宝，请在手机上打开淘宝并检查授权或登录页面。")
+        deadline = time.monotonic() + 6
+        while True:
+            package = foreground(device)
+            if package == TAOBAO:
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(0.5, remaining))
+    raise NeedsAttention(
+        f"连续三次启动后仍未进入淘宝，当前前台为 {package or '未知应用'}。"
+        "请在手机上打开淘宝并检查授权、登录页面或锁屏状态。"
+    )

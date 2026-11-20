@@ -98,9 +98,12 @@ class CompletionTests(unittest.TestCase):
 class RecoveryTests(unittest.TestCase):
     def test_recovery_is_bounded(self):
         device = Mock()
-        device.app_current.return_value = {"package": "com.tencent.mm"}
         device.shell.return_value.exit_code = 0
-        with patch("taobao_coins.android.time.sleep"):
+        device.shell.return_value.output = "Starting: Intent"
+        with (
+            patch("taobao_coins.android.foreground", return_value="com.tencent.mm"),
+            patch("taobao_coins.android.time.monotonic", side_effect=range(0, 100, 7)),
+        ):
             with self.assertRaises(NeedsAttention):
                 ensure_taobao(device)
         self.assertEqual(device.shell.call_count, 3)
