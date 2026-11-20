@@ -15,3 +15,12 @@ platform-tools/
 .idea/
 .vscode/
 .DS_Store
+!android/app/src/main/AndroidManifest.xml
+!android/app/src/main/res/**/*.xml
+android/.gradle/
+android/**/build/
+android/local.properties
+*.apk
+*.jks
+*.keystore
+dist/

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">淘金币助手</string>
+    <string name="run_state">状态：%1$s</string>
+    <string name="accessibility_description">仅在你点击开始后，读取淘宝页面、在内存中截图识别，并点击和滑动以执行免费的站内淘金币任务。不会上传或保存截图。可随时通过停止按钮终止；遇到验证时停止，请手动处理。关闭服务可撤回权限。</string>
+</resources>
