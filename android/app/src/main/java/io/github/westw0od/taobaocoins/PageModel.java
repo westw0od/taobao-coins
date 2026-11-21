@@ -27,7 +27,8 @@ public final class PageModel {
     );
     private static final Pattern SECONDS = Pattern.compile("浏览(\\d{1,2})(?:秒|[sS])");
     private static final Pattern PROGRESS = Pattern.compile("[(（](\\d+)/(\\d+)[)）]");
-    private static final Set<String> NAVIGATION = Set.of("领淘金币", "我的淘宝", "关闭按钮", "赚更多金币", "签到领金币");
+    private static final Set<String> NAVIGATION = Set.of("领淘金币", "我的淘宝", "关闭按钮", "赚更多金币", "签到领金币",
+        "展开", "展开更多", "展开更多任务", "展开全部", "展开全部任务", "收起");
 
     public static final class Line {
         public final String text;
@@ -69,7 +70,39 @@ public final class PageModel {
             for (Line line : lines)
                 if (line.y < height * .19 && containsAny(line.text,
                     "今日速赚", "更多金币等你赚", "赚金币抵钱", "今日累计奖励")) return true;
+            // The heading scrolls offscreen while looking for the lower section.
+            // A visible section title or a structured task row still identifies it.
+            if (moreSectionHeading() != null) return true;
+            for (Line button : lines) {
+                if ((!isTaskAction(button.text) && !isPanelStatusLabel(button.text)) || button.x < width * .76
+                    || button.y < height * .12 || button.y > height * .94) continue;
+                boolean progress = false, instruction = false;
+                for (Line line : lines) if (line.x < width * .75
+                    && Math.abs(line.y - button.y) < height * .05) {
+                    progress |= PROGRESS.matcher(line.text).find();
+                    instruction |= containsAny(line.text, "浏览", "点击", "参与答题", "金币", "逛逛");
+                }
+                if (progress && instruction) return true;
+            }
             return false;
+        }
+        private Line moreSectionHeading() {
+            for (Line line : lines) if (line.text.startsWith("更多金币等你赚")) return line;
+            return null;
+        }
+        public Line moreTasksExpand() {
+            Line heading = moreSectionHeading();
+            if (heading == null) return null;
+            Line best = null;
+            for (Line line : lines) {
+                if (!isExpandLabel(line.text) || !validNavigationBounds(line, width, height)) continue;
+                // Associate the button with this section, not another "展开" on the page.
+                float delta = line.y - heading.y;
+                boolean sameRow = line.x > width * .6 && Math.abs(delta) <= height * .06;
+                boolean belowTitle = delta >= 0 && delta <= height * .14 && line.x > width * .2;
+                if ((sameRow || belowTitle) && (best == null || area(line) < area(best))) best = line;
+            }
+            return best;
         }
         public String verification() {
             if (find("验证码", "滑块验证", "拖动滑块", "向右滑动验证", "向右滑动完成验证",
@@ -134,7 +167,13 @@ public final class PageModel {
     public static boolean isTaskAction(String text) {
         return ACTIONS.contains(text) || text.matches("[币市]?\\+\\d+");
     }
+    public static boolean isPanelStatusLabel(String text) {
+        return Set.of("已完成", "已领取", "明日再来").contains(text);
+    }
     public static boolean isNavigationLabel(String text) { return NAVIGATION.contains(text.replaceAll("\\s+", "")); }
+    public static boolean isExpandLabel(String text) {
+        return text.replaceAll("\\s+", "").matches("^展开(?:更多|全部)?(?:任务)?[∨vV⌄↓>›»﹀▼▾]*$");
+    }
     public static boolean validNavigationBounds(Line line, int width, int height) {
         return line.left >= 0 && line.top >= 0 && line.right <= width && line.bottom <= height
             && line.right > line.left && line.bottom > line.top
@@ -156,7 +195,8 @@ public final class PageModel {
                 left = Math.min(left, next.left); top = Math.min(top, next.top);
                 right = Math.max(right, next.right); bottom = Math.max(bottom, next.bottom);
                 Line candidate = new Line(text.toString(), left, top, right, bottom);
-                if (isNavigationLabel(candidate.text) && validNavigationBounds(candidate, width, height)) found.add(candidate);
+                if ((isNavigationLabel(candidate.text) || isPanelStatusLabel(candidate.text))
+                    && validNavigationBounds(candidate, width, height)) found.add(candidate);
                 previous = next;
                 if (text.length() > 6) break;
             }

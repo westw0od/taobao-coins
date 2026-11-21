@@ -64,12 +64,13 @@ final class CoinEngine {
         Map<String, Integer> attempts = new HashMap<>();
         int updated = 0, skipped = 0, idlePages = 0, performed = 0;
         int arrivalAttempts = 0;
-        boolean expanded = false;
+        int expandAttempts = 0;
         long deadline = System.nanoTime() - pausedNanos + 45L * 60 * 1_000_000_000;
         while (idlePages < 7 && performed < 100 && System.nanoTime() - pausedNanos < deadline) {
             try {
                 phone.checkStopped();
                 if (!page.isPanel()) { page = recoverPanel(); continue; }
+                if (page.moreTasksExpand() == null) expandAttempts = 0;
                 PageModel.Line arrival = page.exact("领取奖励");
                 if (arrival != null && arrivalAttempts < 3) {
                     boolean isArrival = false;
@@ -83,16 +84,24 @@ final class CoinEngine {
                     task = candidate; break;
                 }
                 if (task == null) {
-                    PageModel.Line expand = page.exact("展开");
-                    if (expand != null && page.find("更多金币等你赚") != null && !expanded) {
-                        expanded = true;
+                    PageModel.Line expand = page.moreTasksExpand();
+                    if (expand != null) {
+                        if (expandAttempts >= 2) {
+                            expandAttempts = 0;
+                            throw new CoinService.Attention("更多金币任务区展开后仍未变化，请手动展开后点继续");
+                        }
+                        phone.log("展开更多金币任务");
                         phone.tap(expand);
+                        expandAttempts++;
+                        idlePages = 0;
+                        phone.waitMs(600);
                     }
                     else { idlePages++; phone.swipe(page.width, page.height, false); }
                     page = phone.read();
                     continue;
                 }
                 idlePages = 0;
+                expandAttempts = 0;
                 performed++;
                 attempts.put(task.title, attempts.getOrDefault(task.title, 0) + 1);
                 phone.log("执行：" + task.title);

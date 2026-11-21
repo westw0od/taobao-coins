@@ -99,4 +99,40 @@ public class PageModelTest {
         assertEquals("领淘金币", found.get(0).text);
         assertEquals(503f, found.get(0).x, .01f);
     }
+    @Test public void lowerSectionRemainsPanelWhenMainHeadingIsOffscreen() {
+        PageModel.Line expand = line("展开∨", 960, 1650);
+        PageModel.Page scrolled = page(line("更多金币等你赚", 400, 1650), expand);
+        assertTrue(scrolled.isPanel());
+        assertSame(expand, scrolled.moreTasksExpand());
+        PageModel.Page rowsOnly = page(line("浏览剩余好物(0/3)", 450, 710), line("浏览15秒", 450, 760), line("去完成", 960, 745));
+        assertTrue(rowsOnly.isPanel());
+        assertEquals(1, rowsOnly.tasks().size());
+    }
+    @Test public void expandVariantsHaveToBeNearTheirOwnSectionHeading() {
+        for (String label : List.of("展开", "展开∨", "展开v", "展开更多任务", "展开全部")) {
+            PageModel.Line expand = line(label, 960, 1600);
+            assertSame(label, expand, page(line("更多金币等你赚", 400, 1600), expand).moreTasksExpand());
+        }
+        assertNull(page(line("更多金币等你赚", 400, 300), line("展开", 960, 1800)).moreTasksExpand());
+        assertNull(page(line("展开", 960, 1600)).moreTasksExpand());
+        assertNull(page(new PageModel.Line("更多金币等你赚展开", 40, 1500, 1040, 1550)).moreTasksExpand());
+    }
+    @Test public void filteredCrossAppRowsStillIdentifyTaskPanelWithoutExecutingThem() {
+        PageModel.Page rows = page(line("去支付宝农场(0/1)", 450, 710), line("浏览5秒", 450, 760), line("去完成", 960, 745));
+        assertTrue(rows.isPanel());
+        assertTrue(rows.tasks().isEmpty());
+    }
+    @Test public void symbolBoxesExtractExpandFromJoinedSectionLine() {
+        List<PageModel.Line> found = PageModel.navigationFragments(List.of(
+            new PageModel.Line("展", 900, 1500, 930, 1540),
+            new PageModel.Line("开", 932, 1500, 962, 1540)), 1080, 2340);
+        assertEquals(1, found.size());
+        assertEquals("展开", found.get(0).text);
+        assertEquals(931f, found.get(0).x, .01f);
+    }
+    @Test public void completedQuickRowsStillIdentifyPanelWhileScrollingToMoreTasks() {
+        PageModel.Page doneRows = page(line("快速赚(1/1)", 450, 710), line("浏览5秒", 450, 760), line("已完成", 960, 745));
+        assertTrue(doneRows.isPanel());
+        assertTrue(doneRows.tasks().isEmpty());
+    }
 }

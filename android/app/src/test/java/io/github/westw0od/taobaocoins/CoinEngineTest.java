@@ -68,14 +68,18 @@ public class CoinEngineTest {
         verify(phone, never()).tap(any());
         verify(phone, never()).log(contains("本轮结束"));
     }
-    @Test public void unresponsiveExpandButtonIsOnlyTappedOnce() throws Exception {
+    @Test public void unresponsiveExpansionPausesAfterTwoAttempts() throws Exception {
         CoinService phone = mock(CoinService.class);
         when(phone.foreground()).thenReturn(PageModel.TAOBAO);
         when(phone.read()).thenReturn(new PageModel.Page(List.of(
-            line("更多金币等你赚", 500, 250), line("展开", 500, 1900)), 1080, 2340));
-        new CoinEngine(phone).run();
-        verify(phone, times(1)).tap(any());
-        verify(phone).log(contains("本轮结束"));
+            line("更多金币等你赚", 400, 1600), line("展开", 960, 1600)), 1080, 2340));
+        doThrow(new InterruptedException()).when(phone).awaitUser(anyString());
+        try { new CoinEngine(phone).run(); fail("Unresponsive expansion must pause"); }
+        catch (InterruptedException expected) { }
+        verify(phone, times(2)).tap(any());
+        verify(phone).awaitUser(contains("展开后仍未变化"));
+        verify(phone, never()).back();
+        verify(phone, never()).log(contains("本轮结束"));
     }
     @Test public void staleArrivalRewardIsBounded() throws Exception {
         CoinService phone = mock(CoinService.class);
@@ -205,5 +209,82 @@ public class CoinEngineTest {
         verify(phone, times(3)).tap(any());
         verify(phone, times(1)).awaitUser("手机需要完成验证");
         verify(phone).log(contains("观察到 1 次进度更新，跳过 1 项"));
+    }
+    @Test public void quickTaskThenLowerSectionExpandsAgainAfterEachReturn() throws Exception {
+        CoinService phone = mock(CoinService.class);
+        when(phone.foreground()).thenReturn(PageModel.TAOBAO);
+        PageModel.Line expand = line("展开更多任务∨", 960, 1700);
+        PageModel.Page collapsed = new PageModel.Page(List.of(
+            line("更多金币等你赚", 400, 1700), expand), 1080, 2340);
+        PageModel.Page finished = new PageModel.Page(List.of(line("今日速赚200淘金币", 500, 250)), 1080, 2340);
+        AtomicReference<PageModel.Page> current = new AtomicReference<>(new PageModel.Page(List.of(
+            line("今日速赚200淘金币", 500, 250), line("快速赚(0/1)", 450, 710),
+            line("浏览5秒", 450, 760), line("去完成", 960, 745)), 1080, 2340));
+        java.util.concurrent.atomic.AtomicInteger completed = new java.util.concurrent.atomic.AtomicInteger();
+        when(phone.read()).thenAnswer(invocation -> current.get());
+        doAnswer(invocation -> {
+            PageModel.Line button = invocation.getArgument(0);
+            if (button == expand) {
+                // The fixed heading has scrolled away in the expanded section.
+                int index = completed.get();
+                current.set(new PageModel.Page(List.of(line("剩余浏览" + index + "(0/1)", 450, 1110),
+                    line("浏览5秒", 450, 1160), line("去完成", 960, 1145)), 1080, 2340));
+            } else {
+                completed.incrementAndGet();
+                current.set(new PageModel.Page(List.of(line("任务已完成", 900, 1800)), 1080, 2340));
+            }
+            return null;
+        }).when(phone).tap(any());
+        doAnswer(invocation -> { current.set(completed.get() < 3 ? collapsed : finished); return null; }).when(phone).back();
+        new CoinEngine(phone).run();
+        assertEquals(3, completed.get());
+        verify(phone, times(2)).tap(same(expand));
+        verify(phone, times(5)).tap(any());
+        verify(phone, never()).awaitUser(anyString());
+        verify(phone, never()).launchTaobao();
+        verify(phone).log(contains("观察到 3 次进度更新，跳过 0 项"));
+    }
+    @Test public void touchInterruptedTaskPausesAndCanRunAfterContinue() throws Exception {
+        CoinService phone = mock(CoinService.class);
+        when(phone.foreground()).thenReturn(PageModel.TAOBAO);
+        PageModel.Page ready = new PageModel.Page(List.of(line("今日速赚200淘金币", 500, 250),
+            line("浏览好物(0/1)", 450, 710), line("浏览5秒", 450, 760), line("去完成", 960, 745)), 1080, 2340);
+        PageModel.Page done = new PageModel.Page(List.of(line("今日速赚200淘金币", 500, 250)), 1080, 2340);
+        AtomicReference<PageModel.Page> current = new AtomicReference<>(ready);
+        java.util.concurrent.atomic.AtomicInteger clicks = new java.util.concurrent.atomic.AtomicInteger();
+        when(phone.read()).thenAnswer(invocation -> current.get());
+        doAnswer(invocation -> {
+            if (clicks.incrementAndGet() == 1) throw new CoinService.Attention("自动手势被触屏或系统打断");
+            current.set(new PageModel.Page(List.of(line("任务已完成", 900, 1800)), 1080, 2340));
+            return null;
+        }).when(phone).tap(any());
+        doAnswer(invocation -> { current.set(done); return null; }).when(phone).back();
+        new CoinEngine(phone).run();
+        verify(phone).awaitUser("自动手势被触屏或系统打断");
+        verify(phone, times(2)).tap(any());
+        verify(phone, never()).requestStop();
+        verify(phone).log(contains("观察到 1 次进度更新，跳过 0 项"));
+    }
+    @Test public void completedRowsWithoutHeadingCanScrollDownToExpansion() throws Exception {
+        CoinService phone = mock(CoinService.class);
+        when(phone.foreground()).thenReturn(PageModel.TAOBAO);
+        PageModel.Page top = new PageModel.Page(List.of(line("今日速赚200淘金币", 500, 250)), 1080, 2340);
+        PageModel.Page middle = new PageModel.Page(List.of(line("快速赚(1/1)", 450, 710),
+            line("浏览5秒", 450, 760), line("已完成", 960, 745)), 1080, 2340);
+        PageModel.Line expand = line("展开", 960, 1600);
+        PageModel.Page lower = new PageModel.Page(List.of(line("更多金币等你赚", 400, 1600), expand), 1080, 2340);
+        AtomicReference<PageModel.Page> current = new AtomicReference<>(top);
+        when(phone.read()).thenAnswer(invocation -> current.get());
+        doAnswer(invocation -> {
+            boolean down = invocation.getArgument(2);
+            if (!down) current.set(current.get() == top ? middle : lower);
+            return null;
+        }).when(phone).swipe(anyInt(), anyInt(), anyBoolean());
+        doThrow(new InterruptedException()).when(phone).tap(same(expand));
+        try { new CoinEngine(phone).run(); fail("Stop after verifying expansion is reached"); }
+        catch (InterruptedException expected) { }
+        verify(phone).tap(same(expand));
+        verify(phone, never()).back();
+        verify(phone, never()).awaitUser(anyString());
     }
 }

@@ -48,6 +48,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 /** All screenshots stay in memory. Gestures require a fresh Taobao focus check. */
 public class CoinService extends AccessibilityService {
@@ -57,6 +58,7 @@ public class CoinService extends AccessibilityService {
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final AtomicBoolean busy = new AtomicBoolean();
     private final ManualPause manualPause = new ManualPause();
+    private final AtomicReference<String> pendingPause = new AtomicReference<>();
     private final List<String> messages = new ArrayList<>();
     private volatile boolean stopped;
     private volatile Thread runThread;
@@ -78,7 +80,7 @@ public class CoinService extends AccessibilityService {
         state = "无障碍已开启，等待开始";
     }
     @Override public void onAccessibilityEvent(AccessibilityEvent event) { }
-    @Override public void onInterrupt() { requestStop(); }
+    @Override public void onInterrupt() { requestPause("系统中断了辅助操作，请处理页面后点继续"); }
     @Override public void onDestroy() {
         requestStop();
         worker.shutdownNow();
@@ -106,9 +108,13 @@ public class CoinService extends AccessibilityService {
         Thread thread = runThread;
         if (thread != null) thread.interrupt();
     }
+    void requestPause(String reason) {
+        if (busy.get() && !manualPause.isPaused()) pendingPause.compareAndSet(null, reason);
+    }
     public void startRun() {
         if (!busy.compareAndSet(false, true)) return;
         stopped = false;
+        pendingPause.set(null);
         manualPause.reset();
         synchronized (this) { messages.clear(); }
         log("准备打开淘宝");
@@ -158,6 +164,7 @@ public class CoinService extends AccessibilityService {
         if (!wakeLock.isHeld()) wakeLock.acquire(60 * 60 * 1000L);
     }
     void awaitUser(String reason) throws InterruptedException {
+        pendingPause.set(null);
         manualPause.awaitResume(() -> {
             releaseWakeLock();
             log("已暂停，等待手动处理：" + reason + "；完成后点“继续”");
@@ -174,6 +181,7 @@ public class CoinService extends AccessibilityService {
             });
         });
         if (stopped || Thread.currentThread().isInterrupted()) throw new InterruptedException();
+        pendingPause.set(null);
         acquireWakeLock();
         log("继续运行，重新检查金币任务页");
         main.post(this::updateOverlay);
@@ -225,6 +233,8 @@ public class CoinService extends AccessibilityService {
     }
     void checkStopped() throws InterruptedException, Attention {
         if (stopped || Thread.currentThread().isInterrupted()) throw new InterruptedException();
+        String pauseReason = pendingPause.getAndSet(null);
+        if (pauseReason != null) throw new Attention(pauseReason);
         if (!getSystemService(PowerManager.class).isInteractive()
             || getSystemService(KeyguardManager.class).isKeyguardLocked())
             throw new Attention("手机已锁屏，请解锁后点继续");
@@ -260,13 +270,14 @@ public class CoinService extends AccessibilityService {
         checkStopped();
         CompletableFuture<Boolean> result = new CompletableFuture<>();
         main.post(() -> {
-            if (stopped) { result.complete(false); return; }
+            if (stopped || !busy.get() || manualPause.isPaused() || pendingPause.get() != null || result.isDone())
+                { result.complete(false); return; }
             Intent intent = getPackageManager().getLaunchIntentForPackage(PageModel.TAOBAO);
             if (intent == null) { result.complete(false); return; }
             try { startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)); result.complete(true); }
             catch (RuntimeException e) { result.complete(false); }
         });
-        if (!result.get(5, TimeUnit.SECONDS)) throw new Attention("未能打开淘宝，请确认已安装并登录淘宝");
+        GestureWait.await(result, 5000, "未能打开淘宝，请确认已安装并登录淘宝后点继续");
         for (int n = 0; n < 20; n++) {
             waitMs(300);
             if (PageModel.TAOBAO.equals(foreground())) return;
@@ -277,10 +288,13 @@ public class CoinService extends AccessibilityService {
         requireTaobao();
         CompletableFuture<Boolean> result = new CompletableFuture<>();
         main.post(() -> {
-            if (stopped || !PageModel.TAOBAO.equals(foreground())) { result.complete(false); return; }
-            result.complete(performGlobalAction(GLOBAL_ACTION_BACK));
+            try {
+                if (stopped || !busy.get() || manualPause.isPaused() || pendingPause.get() != null
+                    || result.isDone() || !PageModel.TAOBAO.equals(foreground())) { result.complete(false); return; }
+                result.complete(performGlobalAction(GLOBAL_ACTION_BACK));
+            } catch (RuntimeException error) { result.completeExceptionally(error); }
         });
-        if (!result.get(3, TimeUnit.SECONDS)) throw new LeftTaobao("返回前页面已切换");
+        GestureWait.await(result, 3000, "返回操作被打断或页面已切换，请处理后点继续");
         waitMs(900);
     }
     void tap(PageModel.Line line) throws Exception {
@@ -295,18 +309,21 @@ public class CoinService extends AccessibilityService {
         requireTaobao();
         CompletableFuture<Boolean> complete = new CompletableFuture<>();
         main.post(() -> {
-            if (stopped || !PageModel.TAOBAO.equals(foreground())) { complete.complete(false); return; }
-            Path path = new Path(); path.moveTo(x1, y1);
-            if (x1 != x2 || y1 != y2) path.lineTo(x2, y2);
-            GestureDescription gesture = new GestureDescription.Builder()
-                .addStroke(new GestureDescription.StrokeDescription(path, 0, duration)).build();
-            boolean sent = dispatchGesture(gesture, new GestureResultCallback() {
-                @Override public void onCompleted(GestureDescription value) { complete.complete(true); }
-                @Override public void onCancelled(GestureDescription value) { complete.complete(false); }
-            }, main);
-            if (!sent) complete.complete(false);
+            try {
+                if (stopped || !busy.get() || manualPause.isPaused() || pendingPause.get() != null
+                    || complete.isDone() || !PageModel.TAOBAO.equals(foreground())) { complete.complete(false); return; }
+                Path path = new Path(); path.moveTo(x1, y1);
+                if (x1 != x2 || y1 != y2) path.lineTo(x2, y2);
+                GestureDescription gesture = new GestureDescription.Builder()
+                    .addStroke(new GestureDescription.StrokeDescription(path, 0, duration)).build();
+                boolean sent = dispatchGesture(gesture, new GestureResultCallback() {
+                    @Override public void onCompleted(GestureDescription value) { complete.complete(true); }
+                    @Override public void onCancelled(GestureDescription value) { complete.complete(false); }
+                }, main);
+                if (!sent) complete.complete(false);
+            } catch (RuntimeException error) { complete.completeExceptionally(error); }
         });
-        if (!complete.get(4, TimeUnit.SECONDS)) throw new SkipTask("手势被取消或页面已切换");
+        GestureWait.await(complete, 4000, "自动手势被触屏或系统打断，请操作完成后点继续");
         checkStopped();
     }
     private Bitmap capture() throws Exception {
@@ -316,24 +333,31 @@ public class CoinService extends AccessibilityService {
         nextScreenshotAt = android.os.SystemClock.elapsedRealtime() + 400;
         CompletableFuture<Bitmap> future = new CompletableFuture<>();
         main.post(() -> {
-            if (stopped || future.isDone()) { future.cancel(false); return; }
-            takeScreenshot(Display.DEFAULT_DISPLAY, getMainExecutor(), new TakeScreenshotCallback() {
-                @Override public void onSuccess(ScreenshotResult result) {
-                    Bitmap copy = null;
-                    try (HardwareBuffer buffer = result.getHardwareBuffer()) {
-                        Bitmap hardware = Bitmap.wrapHardwareBuffer(buffer, result.getColorSpace());
-                        if (hardware != null) {
-                            try { copy = hardware.copy(Bitmap.Config.ARGB_8888, false); }
-                            finally { hardware.recycle(); }
-                        }
-                        if (copy == null) future.completeExceptionally(new Attention("无法读取屏幕截图"));
-                        else if (!future.complete(copy)) copy.recycle();
-                    } catch (Exception e) { future.completeExceptionally(e); }
+            try {
+                if (stopped || !busy.get() || manualPause.isPaused() || pendingPause.get() != null || future.isDone()) {
+                    future.completeExceptionally(new Attention("截图前操作已中断，请处理页面后点继续"));
+                    return;
                 }
-                @Override public void onFailure(int code) {
-                    future.completeExceptionally(new Attention("无法截图（代码 " + code + "），请检查无障碍权限或页面限制"));
-                }
-            });
+                takeScreenshot(Display.DEFAULT_DISPLAY, getMainExecutor(), new TakeScreenshotCallback() {
+                    @Override public void onSuccess(ScreenshotResult result) {
+                        Bitmap copy = null;
+                        try (HardwareBuffer buffer = result.getHardwareBuffer()) {
+                            Bitmap hardware = Bitmap.wrapHardwareBuffer(buffer, result.getColorSpace());
+                            if (hardware != null) {
+                                try { copy = hardware.copy(Bitmap.Config.ARGB_8888, false); }
+                                finally { hardware.recycle(); }
+                            }
+                            if (copy == null) future.completeExceptionally(new Attention("无法读取屏幕截图"));
+                            else if (!future.complete(copy)) copy.recycle();
+                        } catch (Exception e) { future.completeExceptionally(e); }
+                    }
+                    @Override public void onFailure(int code) {
+                        future.completeExceptionally(new Attention("无法截图（代码 " + code + "），请检查无障碍权限或页面限制"));
+                    }
+                });
+            } catch (RuntimeException error) {
+                future.completeExceptionally(new Attention("截图请求被打断，请检查页面后点继续"));
+            }
         });
         boolean delivered = false;
         try {
@@ -367,6 +391,7 @@ public class CoinService extends AccessibilityService {
             Text result;
             try { result = Tasks.await(recognition, 12, TimeUnit.SECONDS); }
             catch (TimeoutException e) { throw new Attention("本地识别超时，请检查手机页面后点继续"); }
+            catch (ExecutionException e) { throw new Attention("本地识别被打断，请检查手机页面后点继续"); }
             requireTaobao();
             List<PageModel.Line> lines = new ArrayList<>();
             for (Text.TextBlock block : result.getTextBlocks()) for (Text.Line line : block.getLines()) {
@@ -388,7 +413,7 @@ public class CoinService extends AccessibilityService {
                         if (box != null && !symbol.getText().trim().isEmpty())
                             symbols.add(new PageModel.Line(symbol.getText(), box.left, box.top, box.right, box.bottom));
                     }
-                    if (PageModel.isTaskAction(word)) addLine(lines, word, bounds);
+                    if (PageModel.isTaskAction(word) || PageModel.isPanelStatusLabel(word)) addLine(lines, word, bounds);
                     if (bounds.centerX() < width * .75) {
                         leftText.append(word);
                         if (leftBounds == null) leftBounds = new Rect(bounds); else leftBounds.union(bounds);
@@ -423,7 +448,8 @@ public class CoinService extends AccessibilityService {
         for (CharSequence value : new CharSequence[]{text, description}) {
             if (value == null) continue;
             String word = value.toString().replaceAll("\\s+", "");
-            if (!word.equals("领淘金币") && !word.equals("我的淘宝") && !word.equals("关闭按钮")) continue;
+            if (!word.equals("领淘金币") && !word.equals("我的淘宝") && !word.equals("关闭按钮")
+                && !PageModel.isExpandLabel(word)) continue;
             PageModel.Line candidate = new PageModel.Line(word, bounds.left, bounds.top, bounds.right, bounds.bottom);
             if (PageModel.validNavigationBounds(candidate, width, height)) addLine(lines, word, bounds);
         }
